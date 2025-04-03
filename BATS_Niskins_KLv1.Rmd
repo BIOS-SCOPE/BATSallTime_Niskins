@@ -1,0 +1,199 @@
+---
+title: "BATS_Niskins_KLv1"
+author: "Krista Longnecker"
+date: "`April 3, 2025`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Open up the libraries (Don't need all of these, but I did not go through the script to prune them)
+
+
+```{r load libraries, message=FALSE, warning=FALSE}
+rm(list = ls()) #start with a clean workspace (better for testing)
+
+library(data.table) # you need to install this package from CRAN
+library(dplyr)
+library(readr) #this is part of the tidyverse package
+library(here) #install this (once, install.packages("here))
+#library(tidyverse) #amazing 
+library(lubridate) #great for handling date data
+library(zoo) #for interpolations
+library(oce) #for integrations (package that will do oceanographic calculations)
+library(ggplot2)
+library(gridExtra)
+
+library(reshape2)
+```
+
+STEP 1: Organizing BATS Bottle data downloaded from BATS web site.\
+BATS data are available here: https://bios.asu.edu/bats/bats-data (as of 3 April 2025). The file with all the bottle information is : `bats_bottle.txt`
+
+
+```{r GetFiles, message=FALSE, warning=FALSE}
+
+rm(list=ls()) # clears the working environment to the right
+options(stringsAsFactors=FALSE) # we want to avoid R creating factors when importing the data 
+
+NameOfFile <- "BATS_Niskins.2025.04.03.RData"
+#let's make this a little more uniform to make it easier to swap computers
+here::here()
+
+file.path <- "bats_bottle_KLdownload.txt"
+
+# Load BATS data file into R
+# This will skip over the first 59 lines from the file, up through the header
+# BATS uses the first rows of the data file to set up the variable information.
+# KL downloaded new version of file, let's use that one as that will be a better
+# representative of what will get used in the future.
+raw <- read.table(file.path,header = F, skip = 59)
+
+```
+
+STEP 2: This section puts the headers on columns
+
+```{r STEP 2 - Add Headers to columns, message=FALSE, warning=FALSE}
+# The BATS data file has a complicated format due to a combination of comma and tab-separation
+# The header was removed above when file was loaded due to the commas which confuses R
+# KL setting this up so the header is read in (avoid errors when changing variable names)
+
+justHeaders <- read_lines(file.path, skip = 58, n_max = 1)
+tt <- gsub(" ","",justHeaders) #remove the extra spaces
+ttt <- gsub("\t","",tt) #remove the tabs
+cleanedHeader <- strsplit(ttt,",") #this is now comma-separated, divide based on ","
+header <- unlist(cleanedHeader) #result is a list, unlist so I can use it
+rm(justHeaders,tt,ttt,cleanedHeader) #clean up variables no longer needed
+colnames(raw) <- header #puts column names into header
+
+# Change the name of our dataframe and remove missing data values and replace with NAs
+data <- raw #defining a new object that uses raw and calls it a new "object" so as not to wreck the original object i.e. raw
+data[data == -999] <- NA #anywhere in this object data where value is -999 we are going to call it NA
+#str(data)
+
+##use this opportunity to pull out month and date (using package lubridate)
+data[,'month'] <- month(ymd(data[,'yyyymmdd']))
+data[,'year'] <- year(ymd(data[,'yyyymmdd']))
+
+rm(raw) #housecleaning
+
+```
+
+
+Remove stations more than 50 nm away from BATS (KL note 3 April 2025 --> this is off for now)
+
+``` {r spatialMask, eval = FALSE}
+#require points to be within some distance of BATS
+lat = 31 + 40/60;
+lon = (64 + 10/60)
+BATS  <- data.frame(lat,lon)
+HS <- data.frame(lat = 32.1667, lon =64.5000)
+
+allPoints <- as.data.frame(data)
+
+df <- as.data.frame(data)
+
+#use geodDist from the R package oce to calculate distances from BATS
+df$distance <- geodDist(df$lonW,df$latN,BATS$lon,BATS$lat)
+
+howFar = 18.52 * 5  #remember: 10 nm ~ 18.52 km
+
+#only keep data within the circle defined (check that definition)
+data <- as.data.frame(df) %>%
+  filter(distance < howFar) 
+
+ggplot(data = allPoints, aes(x = lonW, y = latN),color = "year") + 
+  geom_point(color = "gray") +
+  geom_point(data = data,aes(x=lonW,y=latN),color = "blue") +
+  geom_point(data = BATS,aes(x = lon, y = lat),color = 'red') +
+  geom_point(data = HS,aes(x = lon, y = lat),color = 'magenta') +
+  ggtitle("magenta = Hydrostation S; red = BATS; blue is stations within 50 nm")
+
+#housecleaning
+rm(BATS,HS,lat,lon,howFar)
+  
+```
+
+
+STEP 3: The Id has the cruise type/number/cast/bottle information as one number --> split that up.
+
+```{r splitID}
+# break up ID to provide cruise, cast, and bottle ID
+#data$cruise.type <- substr(data$Id, 1,1) #not doing this any more, use 5-digit cruise details
+data$cruise <- substr(data$Id, 1,5) 
+data$cast <- as.integer(substr(data$Id, 6,8))
+data$bottle <- as.integer(substr(data$Id, 9,10))
+
+##limit cruise years by year? (e.g., cruises with DON/TN data start in 1994)
+#data <- data[data$yyyymmdd > 19931231,]
+
+#reorganize a little to make the output easier to use
+data <- data %>% relocate(cruise,.after=Id)
+data <- data %>% relocate(cast,.after=cruise)
+data <- data %>% relocate(bottle,.after=cast)
+
+
+```
+
+Export the results as a CSV file
+
+```{r exportResult, warning=FALSE}
+
+#export the results
+write.csv(data,"BATSallTime_Niskins.csv", row.names=F) #cannot use this anymore, too messy
+
+```
+
+Also export the units so that people have that information (as a separate text file)
+
+```{r unitInformation,eval = TRUE}
+#This section will export the units (from the BATS file) as a text file
+
+##Pull the units from the BATS text file (in the header).
+#make a data frame with the header information and the units, easier to keep this separate
+unitDetails <- as.data.frame(header)
+getUnits <- read_lines(file.path,n_max = 58)
+
+#start with idx <- 2 to skip over 'id'
+for (idx in 2:length(header)){
+  t <- pmatch(header[idx],getUnits) #t will be the row with the unit information
+  a <- strsplit(getUnits[t] ,"=")
+  unitDetails[idx,'details'] <- unlist(a)[2]
+  #tidy up
+  rm(t,a)
+}
+#tidy up
+rm(getUnits,idx)
+
+#The use of an equal sign for the Niskin/GoFlo flag causes a problem since 
+#it will result in an unequal number of columns; I have otherwise split the 
+#unit information based on the = sign; manually fix this
+idx <- unitDetails$header %in% 'QF'
+unitDetails[idx,'details'] <- "(-3 = suspect, 1=unverified, 2= verified/acceptable)"
+rm(idx)
+
+#before exporting the units trim & add to list as needed
+idx <- unitDetails$header %in% colnames(data)
+unitDetails <- unitDetails[idx,]
+rm(idx)
+
+#now add the new units...using their variable name as details for now
+toAdd <- as.data.frame(setdiff(colnames(data),unitDetails$header))
+colnames(toAdd) <- 'header'
+toAdd$details <- toAdd$header
+unitDetails <- rbind(unitDetails,toAdd)
+rm(toAdd)
+
+write.table(unitDetails,'BATSallTime_Niskins_unitDetails.txt',row.names=FALSE)
+
+```
+
+
+``` {r saveDetails}
+sessionInfo()
+
+save.image(NameOfFile)
+
+```
